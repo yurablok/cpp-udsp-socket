@@ -169,11 +169,11 @@ void UDSPSocket::stop() {
     m_impl->stop();
 }
 
-bool UDSPSocket::connect(const uint16_t port, const char* IPv4) {
-    return m_impl->connect(port, UDPSocket::IPv4FromString(IPv4));
-}
-bool UDSPSocket::connect(const uint16_t port, const uint32_t IPv4) {
-    return m_impl->connect(port, IPv4);
+bool UDSPSocket::connect(const uint16_t port, const IPAddress& address) {
+    if (not address.isV4()) {
+        return false;
+    }
+    return m_impl->connect(port, address.toIntegerV4());
 }
 bool UDSPSocket::disconnect() {
     return m_impl->disconnect();

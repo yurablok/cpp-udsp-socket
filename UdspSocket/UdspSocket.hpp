@@ -8,6 +8,7 @@
 // License: MIT
 // https://github.com/yurablok/cpp-udsp-socket
 // History:
+// v0.2.1   2026-06-12  Improved usage of `IPAddress`.
 // v0.2     2026-05-30  First public expetimental version.
 // v0.1     2025-06-02  First expetimental version.
 
@@ -23,8 +24,7 @@ public:
     void stop();
 
     // client
-    bool connect(const uint16_t port, const char* IPv4);
-    bool connect(const uint16_t port, const uint32_t IPv4);
+    bool connect(const uint16_t port, const IPAddress& address);
     bool disconnect();
     bool isConnected() const;
 

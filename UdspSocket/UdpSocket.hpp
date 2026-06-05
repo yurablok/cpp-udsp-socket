@@ -8,8 +8,9 @@
 
 class IPAddress {
 public:
-    IPAddress(const uint32_t IPv4 = uint32_t(0)); // native-endian
-    IPAddress(const char* string); // , size_t size_B = 0);
+    IPAddress();
+    IPAddress(const uint32_t IPv4); // native-endian
+    IPAddress(const char* string, size_t size_B = 0);
     IPAddress(uint8_t byte0, uint8_t byte1, uint8_t byte2, uint8_t byte3);
 
     static const IPAddress localHostV4; // 127.0.0.1
@@ -28,6 +29,8 @@ public:
     std::string toString() const;
     uint32_t toIntegerV4() const; // native-endian
     const std::array<uint8_t, 16>& toBytesV6() const; // big-endian
+
+    bool operator==(const IPAddress& other) const;
 
 private:
     std::array<uint8_t, 16> m_bytes = {}; // big-endian
@@ -80,8 +83,6 @@ public:
     // 0 - non-blocking, the delay of input flow depends on polling frequency
     // >0 - blocking, the delay of input flow depends on receive events
     void process(const uint32_t timeout_ms = 1000 / 50);
-
-    static uint32_t IPv4FromString(const char* string);
 
     // 'H'ighest, 'h'igh, 'n'ormal, 'l'ow, 'L'owest
     static bool setThreadPriority(const uintptr_t thread, const char priority = 'n');

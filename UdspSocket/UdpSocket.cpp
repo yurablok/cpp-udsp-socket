@@ -38,6 +38,7 @@ SocketInitializer g_socketInitializer;
 #endif
 
 
+IPAddress::IPAddress() {}
 IPAddress::IPAddress(const uint32_t IPv4) {
     m_bytes[10] = 0xFF;
     m_bytes[11] = 0xFF;
@@ -45,11 +46,14 @@ IPAddress::IPAddress(const uint32_t IPv4) {
     std::memcpy(m_bytes.data() + 12, &IPv4_BE, 4);
     m_variant = Variant::V4;
 }
-IPAddress::IPAddress(const char* string) { // , size_t size_B) {
-    //if (size_B == 0) {
-    //    size_B = strlen(string);
-    //}
-    if (inet_pton(AF_INET6, string, m_bytes.data()) == 1) {
+IPAddress::IPAddress(const char* string, size_t size_B) {
+    const char* nullTerminated = string;
+    std::string buffer;
+    if (size_B > 0) {
+        buffer.assign(string, size_B);
+        nullTerminated = buffer.c_str();
+    }
+    if (inet_pton(AF_INET6, nullTerminated, m_bytes.data()) == 1) {
         if (std::memcmp(m_bytes.data(), "\0\0\0\0\0\0\0\0\0\0\xFF\xFF", 12) == 0) {
             m_variant = Variant::V4inV6;
         }
@@ -59,7 +63,7 @@ IPAddress::IPAddress(const char* string) { // , size_t size_B) {
         return;
     }
     uint32_t IPv4_BE = 0;
-    if (inet_pton(AF_INET, string, &IPv4_BE) == 1) {
+    if (inet_pton(AF_INET, nullTerminated, &IPv4_BE) == 1) {
         m_bytes[10] = 0xFF;
         m_bytes[11] = 0xFF;
         std::memcpy(m_bytes.data() + 12, &IPv4_BE, 4);
@@ -136,6 +140,13 @@ uint32_t IPAddress::toIntegerV4() const {
 const std::array<uint8_t, 16>& IPAddress::toBytesV6() const {
     return m_bytes;
 }
+
+bool IPAddress::operator==(const IPAddress& other) const {
+    return m_variant == other.m_variant
+        and m_bytes == other.m_bytes;
+}
+
+
 
 UDPSocket::UDPSocket() {
     open();
@@ -449,10 +460,6 @@ void UDPSocket::process(const uint32_t timeout_ms) {
         }
         onReceived(buffer.data(), received_B, bigEndian(from.sin_port), bigEndian(from.sin_addr.s_addr));
     }
-}
-
-uint32_t UDPSocket::IPv4FromString(const char* string) {
-    return bigEndian(inet_addr(string));
 }
 
 bool UDPSocket::setThreadPriority(const uintptr_t thread, const char priority) {

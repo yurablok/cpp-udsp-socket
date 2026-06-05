@@ -144,8 +144,7 @@ Chunk variants:
 
 ```cpp
 // client
-bool connect(const uint16_t port, const char* IPv4);
-bool connect(const uint16_t port, const uint32_t IPv4);
+bool connect(const uint16_t port, const IPAddress& address);
 bool disconnect();
 bool isConnected() const;
 
