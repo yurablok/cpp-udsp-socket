@@ -9,6 +9,9 @@ UDSPSocket::Impl::Impl() {
     testStreams();
 # endif // NDEBUG
 
+    std::minstd_rand rng(uint32_t(std::chrono::steady_clock::now().time_since_epoch().count()));
+    localConnectionId = std::uniform_int_distribution<uint64_t>()(rng);
+
     udpSocket.onReceived = std::bind(
         &Impl::onUdpReceived, this,
         std::placeholders::_1, std::placeholders::_2,
@@ -38,26 +41,13 @@ void UDSPSocket::Impl::stop() {
 
         c.onDisconnected();
 #     if UDSP_TRACE_LEVEL >= UDSP_TRACE_LEVEL_STATE_CHANGED
-        std::cout << CLR_MAGENTA "Disconnected " << c.connectionId
+        std::cout << CLR_MAGENTA "Disconnected " << c.remoteConnectionId
             << " (interrupt)" CLR_RESET << std::endl;
 #     endif // UDSP_TRACE_LEVEL
         if (onDisconnected != nullptr) {
             onDisconnected(&c, 'i');
         }
     }
-}
-
-UDSPSocket::Connection& UDSPSocket::Impl::clientConnection() {
-    assert(not connections.empty());
-    assert(connections.begin()->second != nullptr);
-    return *connections.begin()->second;
-}
-UDSPSocket::Connection& UDSPSocket::Impl::serverConnection(const uint64_t connectionId) {
-    auto& ptr = connections[connectionId];
-    if (ptr == nullptr) {
-        ptr = std::make_unique<Connection>(this);
-    }
-    return *ptr;
 }
 
 bool UDSPSocket::Impl::initConnection(Connection& c, const uint16_t port, const uint32_t IPv4) {
@@ -87,22 +77,19 @@ bool UDSPSocket::Impl::connect(const uint16_t port, const uint32_t IPv4) {
     std::lock_guard<std::mutex> lock(mutex);
     if (isServer) {
         //TODO
+        connections.clear();
     }
     localPort = 0;
     isServer = false;
     if (connections.empty()) {
         connections[0] = std::make_unique<Connection>(this);
     }
-    auto& c = clientConnection();
-    if (c.connectionId == 0) {
-        std::minstd_rand rng(uint32_t(std::chrono::steady_clock::now().time_since_epoch().count()));
-        c.connectionId = std::uniform_int_distribution<uint64_t>()(rng);
+    auto& c = *connections.begin()->second;
+    if (c.remoteConnectionId == 0) {
         return initConnection(c, port, IPv4);
     }
     else if (c.port != port or c.IPv4 != IPv4) {
         c.onDisconnected();
-        std::minstd_rand rng(uint32_t(std::chrono::steady_clock::now().time_since_epoch().count()));
-        c.connectionId = std::uniform_int_distribution<uint64_t>()(rng);
         return initConnection(c, port, IPv4);
     }
     return true;
@@ -127,7 +114,7 @@ bool UDSPSocket::Impl::isConnected() {
     if (connections.empty()) {
         return false;
     }
-    return clientConnection().isConnected();
+    return connections.begin()->second->isConnected();
 }
 
 bool UDSPSocket::Impl::listen(const uint16_t port) {

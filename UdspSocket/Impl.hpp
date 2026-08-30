@@ -515,7 +515,7 @@ struct UDSPSocket::Connection {
 
     //uint64_t CCId = 0; // Client Connection Identificator
     //uint64_t SCId = 0; // Server Connection Identificator
-    uint64_t connectionId = 0;
+    uint64_t remoteConnectionId = 0;
 
     uint32_t IPv4 = 0;
     uint16_t port = 0;
@@ -620,8 +620,9 @@ struct UDSPSocket::Connection {
     // Omax(log n)
     static size_t findPacketIdx(const std::deque<uint32_t>& fifo, const uint32_t packetId);
 
-    bool writePacket(const bool isTestBandwidthEnabled, const bool forceSend);
-    void writePMTUProbe();
+    bool writePacket(const uint64_t localConnectionId,
+        const bool isTestBandwidthEnabled, const bool forceSend);
+    void writePMTUProbe(const uint64_t localConnectionId);
     void writeDisconnect();
 
     void nextDatagram();
@@ -640,6 +641,7 @@ struct UDSPSocket::Connection {
 struct UDSPSocket::Impl {
     UDPSocket udpSocket;
 
+    uint64_t localConnectionId = 0;
     std::unordered_map<uint64_t, std::unique_ptr<Connection>> connections; // key=connectionId
 
     std::thread thread;
@@ -663,9 +665,6 @@ struct UDSPSocket::Impl {
     ~Impl();
     void stop();
     void testStreams();
-
-    Connection& clientConnection();
-    Connection& serverConnection(const uint64_t connectionId);
 
     bool initConnection(Connection& c, const uint16_t port, const uint32_t IPv4);
 

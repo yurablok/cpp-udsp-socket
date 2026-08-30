@@ -1052,7 +1052,7 @@ void UDSPSocket::Connection::processTxFifo(TxStream& stream, const int64_t now_u
 
 void UDSPSocket::Connection::onDisconnected() {
     commands.clear();
-    connectionId = 0;
+    remoteConnectionId = 0;
 
     //const bool hasOnDelivered = impl->onDelivered != nullptr;
     for (const auto& txStream : txStreams.map) {

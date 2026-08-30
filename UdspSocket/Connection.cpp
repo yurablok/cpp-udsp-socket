@@ -101,7 +101,7 @@ size_t UDSPSocket::Connection::findPacketIdx(
     return SIZE_MAX;
 }
 
-bool UDSPSocket::Connection::writePacket(
+bool UDSPSocket::Connection::writePacket(const uint64_t localConnectionId,
         const bool isTestBandwidthEnabled, const bool forceSend) {
     txBuffer.resize(PMTU_B);
     //std::fill(txBuffer.begin(), txBuffer.end(), 0);
@@ -152,7 +152,7 @@ bool UDSPSocket::Connection::writePacket(
     auto& header = *reinterpret_cast<PacketHeader*>(&txBuffer[0]);
     header.packetId = PacketId::TypeA;
     header.packetNumber = txPacketsCount;
-    header.connectionId = connectionId;
+    header.connectionId = localConnectionId;
 
     header.packetsLoss_prc100 = rxPacketsLossInWindow_prc100;
 
@@ -173,7 +173,7 @@ bool UDSPSocket::Connection::writePacket(
     header.PMTUProbeSize_B = uint16_t(PMTUProbeResponse_B);
     return true;
 }
-void UDSPSocket::Connection::writePMTUProbe() {
+void UDSPSocket::Connection::writePMTUProbe(const uint64_t localConnectionId) {
     PMTUProbeSize_B = PMTU_B + PMTUProbeStep_B;
     txBuffer.resize(PMTUProbeSize_B);
     std::fill(txBuffer.begin(), txBuffer.end(), uint8_t(0));
@@ -181,7 +181,7 @@ void UDSPSocket::Connection::writePMTUProbe() {
 
     header.packetId = PacketId::PMTUProbe;
     header.packetNumber = 0; // txPacketsCount; // Don't increment here
-    header.connectionId = connectionId;
+    header.connectionId = localConnectionId;
 
     header.packetsLoss_prc100 = rxPacketsLossInWindow_prc100;
 
@@ -209,11 +209,11 @@ void UDSPSocket::Impl::process_ts() {
             c.writeDisconnect();
             udpSocket.send(c.txBuffer.data(), uint32_t(c.txBuffer.size()), c.port, c.IPv4);
 
-            c.onDisconnected();
 #         if UDSP_TRACE_LEVEL >= UDSP_TRACE_LEVEL_STATE_CHANGED
-            std::cout << CLR_MAGENTA "Disconnected " << c.connectionId
-                << " (closed)" CLR_RESET << std::endl;
+            std::cout << CLR_MAGENTA "Disconnected " << c.remoteConnectionId
+                << " (closed locally)" CLR_RESET << std::endl;
 #         endif // UDSP_TRACE_LEVEL
+            c.onDisconnected();
             if (onDisconnected != nullptr) {
                 onDisconnected(&c, 'c');
             }
@@ -226,11 +226,11 @@ void UDSPSocket::Impl::process_ts() {
             if (c.lastPacketTick_us <= now_us - g_connectionTimeout_us) {
                 c.nextEraseTick_us = now_us + 2 * 1000 * 1000;
                 c.lastPacketTick_us = INT64_MAX;
-                c.onDisconnected();
 #             if UDSP_TRACE_LEVEL >= UDSP_TRACE_LEVEL_STATE_CHANGED
-                std::cout << CLR_MAGENTA "Disconnected " << c.connectionId
+                std::cout << CLR_MAGENTA "Disconnected " << c.remoteConnectionId
                     << " (timeout)" CLR_RESET << std::endl;
 #             endif // UDSP_TRACE_LEVEL
+                c.onDisconnected();
                 if (onDisconnected != nullptr) {
                     onDisconnected(&c, 't');
                 }
@@ -275,7 +275,7 @@ void UDSPSocket::Impl::process() {
 
             if (c.nextKeepAliveTick_us <= now_us) {
                 //c.writeHeader().packetId = PacketId::TypeA;
-                c.writePacket(false, true);
+                c.writePacket(localConnectionId, false, true);
                 udpSocket.send(c.txBuffer.data(), uint32_t(c.txBuffer.size()), c.port, c.IPv4);
                 c.nextKeepAliveTick_us = now_us + g_keepAlivePeriod_us;
                 const uint32_t sent_B = uint32_t(c.txBuffer.size()) + g_headerSize_IPv4_B;
@@ -324,7 +324,7 @@ void UDSPSocket::Impl::processConnection(Connection& c, const int64_t now_us) {
         else {
             c.nextPMTUProbe_us = now_us + g_PMTUProbePeriod_us;
             // Search Phase
-            c.writePMTUProbe();
+            c.writePMTUProbe(localConnectionId);
             udpSocket.send(c.txBuffer.data(), uint32_t(c.txBuffer.size()), c.port, c.IPv4);
             //std::cout << CLR_MAGENTA "Search Phase " << c.PMTU_B << " + "
             //    << c.PMTUProbeStep_B << CLR_RESET << std::endl;
@@ -351,7 +351,7 @@ void UDSPSocket::Impl::processConnection(Connection& c, const int64_t now_us) {
 
     uint32_t txCount_B = c.txCount_B;
     while (txCount_B < maxPortion_B) {
-        if (not c.writePacket(isTestBandwidthEnabled, false)) {
+        if (not c.writePacket(localConnectionId, isTestBandwidthEnabled, false)) {
             break;
         }
         udpSocket.send(c.txBuffer.data(), uint32_t(c.txBuffer.size()), c.port, c.IPv4);
@@ -518,35 +518,72 @@ void UDSPSocket::Impl::onUdpReceived(void* data, uint32_t size_B, uint16_t port,
         return;
     }
     auto& header = *reinterpret_cast<const PacketHeader*>(data);
+    Connection* cPtr = nullptr;
     switch (header.packetId) {
     case PacketId::Disconnect: {
-        auto connectionIt = connections.find(header.connectionId);
-        if (connectionIt == connections.end()) {
+        auto connectionIt = connections.find(isServer ? header.connectionId : 0);
+        if (connectionIt == connections.end() or connectionIt->second == nullptr) {
             return;
         }
-        if (connectionIt->second->nextEraseTick_us == INT64_MAX) {
-            connectionIt->second->partialReset();
-            connectionIt->second->nextEraseTick_us = now_us + 2 * 1000 * 1000;
-            connectionIt->second->lastPacketTick_us = INT64_MAX;
-            connectionIt->second->onDisconnected();
-            //sigDisconnected();
+        if (connectionIt->second->remoteConnectionId != header.connectionId) {
+            return;
+        }
+        auto& c = *connectionIt->second;
+        if (c.nextEraseTick_us == INT64_MAX) {
 #         if UDSP_TRACE_LEVEL >= UDSP_TRACE_LEVEL_STATE_CHANGED
-            std::cout << CLR_MAGENTA "Disconnected " << connectionIt->second->connectionId
-                << " (closed)" CLR_RESET << std::endl;
+            std::cout << CLR_MAGENTA "Disconnected " << c.remoteConnectionId
+                << " (closed remotely)" CLR_RESET << std::endl;
 #         endif // UDSP_TRACE_LEVEL
+            c.onDisconnected();
+            c.nextEraseTick_us = now_us + 2 * 1000 * 1000;
+            c.lastPacketTick_us = INT64_MAX;
             if (onDisconnected != nullptr) {
-                onDisconnected(&*connectionIt->second, 'c');
+                onDisconnected(&c, 'c');
             }
+            c.partialReset();
+            //sigDisconnected();
         }
         return;
     }
     case PacketId::TypeA:
     case PacketId::PMTUProbe: {
-        auto connectionIt = connections.find(header.connectionId);
+        uint64_t remoteConnectionId = isServer ? header.connectionId : 0;
+        auto connectionIt = connections.find(remoteConnectionId);
         if (connectionIt != connections.end()) {
             if (connectionIt->second->nextEraseTick_us != INT64_MAX) {
                 return;
             }
+            cPtr = connectionIt->second.get();
+        }
+        else { // isServer
+            constexpr size_t connectionsLimit = 10000;
+            if (connections.size() >= connectionsLimit) {
+                return;
+            }
+            auto& cPtrRef = connections[remoteConnectionId];
+            cPtrRef = std::make_unique<Connection>(this);
+            if (not initConnection(*cPtrRef, port, IPv4)) {
+#             if UDSP_TRACE_LEVEL >= UDSP_TRACE_LEVEL_ERROR
+                std::cout << "Unknown error" << std::endl;
+#             endif // UDSP_TRACE_LEVEL
+                return;
+            }
+            cPtr = cPtrRef.get();
+        }
+        if (cPtr->lastPacketTick_us == INT64_MAX) {
+            cPtr->remoteConnectionId = header.connectionId;
+            cPtr->RTTRequestTick_us = now_us;
+#         if UDSP_TRACE_LEVEL >= UDSP_TRACE_LEVEL_STATE_CHANGED
+            std::cout << CLR_MAGENTA "Connected " << cPtr->remoteConnectionId
+                << CLR_RESET << std::endl;
+#         endif // UDSP_TRACE_LEVEL
+            if (onConnected != nullptr) {
+                onConnected(cPtr);
+            }
+            //c.RTTSmooth_us.init(0.05f, 0.05f);
+        }
+        else if (cPtr->remoteConnectionId != header.connectionId) {
+            return;
         }
         break;
     }
@@ -554,32 +591,7 @@ void UDSPSocket::Impl::onUdpReceived(void* data, uint32_t size_B, uint16_t port,
         return;
     }
 
-    if (not isServer and connections.empty()) {
-        return;
-    }
-    //TODO: Connections number limit
-    auto& c = isServer ? serverConnection(header.connectionId) : clientConnection();
-    if (isServer and c.IPv4 == 0) {
-        c.connectionId = header.connectionId;
-        //TODO: Migration
-        if (not initConnection(c, port, IPv4)) {
-#         if UDSP_TRACE_LEVEL >= UDSP_TRACE_LEVEL_ERROR
-            std::cout << "Unknown error" << std::endl;
-#         endif // UDSP_TRACE_LEVEL
-            return;
-        }
-    }
-    if (c.lastPacketTick_us == INT64_MAX) {
-        c.RTTRequestTick_us = now_us;
-#     if UDSP_TRACE_LEVEL >= UDSP_TRACE_LEVEL_STATE_CHANGED
-        std::cout << CLR_MAGENTA "Connected " << c.connectionId
-            << CLR_RESET << std::endl;
-#     endif // UDSP_TRACE_LEVEL
-        if (onConnected) {
-            onConnected(&c);
-        }
-        //c.RTTSmooth_us.init(0.05f, 0.05f);
-    }
+    auto& c = *cPtr;
     c.lastPacketTick_us = now_us;
 
     if (header.RTTResponse == c.RTTRequest and c.RTTRequestTick_us > 0) {
@@ -766,7 +778,7 @@ void UDSPSocket::Impl::onUdpReceived(void* data, uint32_t size_B, uint16_t port,
             << " loss=" << c.rxPacketsLossInWindow_prc100 * 0.01f <<"\n";
 #     endif // UDSP_TRACE_LEVEL
 
-        c.writePacket(false, true);
+        c.writePacket(localConnectionId, false, true);
         udpSocket.send(c.txBuffer.data(), uint32_t(c.txBuffer.size()), c.port, c.IPv4);
         c.nextKeepAliveTick_us = now_us + g_keepAlivePeriod_us;
         const uint32_t sent_B = uint32_t(c.txBuffer.size()) + g_headerSize_IPv4_B;
