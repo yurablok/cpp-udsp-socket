@@ -8,6 +8,7 @@
 // License: MIT
 // https://github.com/yurablok/cpp-udsp-socket
 // History:
+// v0.2.4   2026-09-19  Added support of MacOS.
 // v0.2.2   2026-08-31  Improved connection handling.
 // v0.2.1   2026-06-12  Improved usage of `IPAddress`.
 // v0.2     2026-05-30  First public expetimental version.

@@ -3,7 +3,7 @@
 #include <cassert>
 #include <array>
 
-#ifdef _WIN32
+#if defined(_WIN32)
 #   define WIN32_LEAN_AND_MEAN // Exclude rarely-used stuff from Windows headers
 #   define NOMINMAX // Fixes the conflicts with STL
 #   define _WIN32_WINNT 0x0601 // Targeting Windows 7 and later
@@ -19,10 +19,11 @@
 #   include <netinet/in.h>
 #   include <arpa/inet.h>
 #   include <pthread.h>
+#   include <sched.h>
 #endif
 
 
-#ifdef _WIN32
+#if defined(_WIN32)
 namespace {
 struct SocketInitializer {
     SocketInitializer() {
@@ -85,7 +86,7 @@ IPAddress::IPAddress(uint8_t byte0, uint8_t byte1, uint8_t byte2, uint8_t byte3)
 const IPAddress IPAddress::localHostV4 = IPAddress(INADDR_LOOPBACK); // 127.0.0.1
 const IPAddress IPAddress::localHostV6 = IPAddress("::1");
 const IPAddress IPAddress::broadcastV4 = IPAddress(INADDR_BROADCAST); // 255.255.255.255
-const IPAddress IPAddress::anyV4 = IPAddress(INADDR_ANY); // 0.0.0.0
+const IPAddress IPAddress::anyV4 = IPAddress(uint32_t(INADDR_ANY)); // 0.0.0.0
 const IPAddress IPAddress::anyV6 = IPAddress("::");
 
 bool IPAddress::isV4() const {
@@ -232,7 +233,7 @@ bool UDPSocket::isLocalPortOpen(const uint16_t port) {
     if (sock == UINTPTR_MAX) {
         return false;
     }
-# ifdef _WIN32
+# if defined(_WIN32)
     u_long mode = 1;
     ::ioctlsocket(sock, FIONBIO, &mode);
 # else
@@ -246,7 +247,7 @@ bool UDPSocket::isLocalPortOpen(const uint16_t port) {
 
     int32_t result = ::connect(sock, (sockaddr*)&addr, sizeof(addr));
     if (result < 0) {
-#     ifdef _WIN32
+#     if defined(_WIN32)
         const int32_t err = WSAGetLastError();
         if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
             ::closesocket(sock);
@@ -261,7 +262,7 @@ bool UDPSocket::isLocalPortOpen(const uint16_t port) {
     }
 
 
-# ifdef _WIN32
+# if defined(_WIN32)
     WSAPOLLFD fd = {};
     fd.fd = sock;
     fd.events = POLLOUT;
@@ -280,7 +281,7 @@ bool UDPSocket::isLocalPortOpen(const uint16_t port) {
         open = (err == 0);
     }
 
-# ifdef _WIN32
+# if defined(_WIN32)
     ::closesocket(sock);
 # else
     ::close(sock);
@@ -368,7 +369,7 @@ bool UDPSocket::setIpDontFragment(const bool isEnabled) {
     }
     return true;
 }
-#ifdef _WIN32
+#if defined(_WIN32)
 bool UDPSocket::setReusePort(const bool) {
     return false; // only for raw sockets
 }
@@ -392,16 +393,39 @@ bool UDPSocket::setReuseAddress(const bool isEnabled) {
 }
 bool UDPSocket::setRxBufferSize_B(const uint32_t size_B) {
     constexpr int32_t len_B = sizeof(size_B);
-    if (setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF,
-            reinterpret_cast<const char*>(&size_B), len_B) != 0) {
-        return false;
+    if (::setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF,
+            reinterpret_cast<const char*>(&size_B), len_B) == 0) {
+        return true;
     }
-    return true;
+    // macOS/BSD refuse SO_RCVBUF/SO_SNDBUF above
+    // `kern.ipc.maxsockbuf * MCLBYTES / (MSIZE + MCLBYTES)`, which is ~7.1 MiB with the
+    // default 8 MiB `kern.ipc.maxsockbuf`, so, a 8 MiB request always fails there with
+    // ENOBUFS. Linux and Windows clamp silently instead. Halve the request down to the
+    // size the protocol actually needs, before treating it as a failure.
+    constexpr uint32_t sizeMin_B = 1 << 19; // 512 KiB
+    uint32_t lower_B = sizeMin_B;
+    uint32_t upper_B = size_B;
+    bool result = false;
+    while (lower_B <= upper_B) {
+        uint32_t middle_B = lower_B + (upper_B - lower_B) / 2;
+        if (::setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF,
+                reinterpret_cast<const char*>(&middle_B), len_B) == 0) {
+            result = true;
+            lower_B = middle_B + 1;
+        }
+        else {
+            upper_B = middle_B - 1;
+        }
+        if (upper_B - lower_B < sizeMin_B) {
+            break;
+        }
+    }
+    return result;
 }
 uint32_t UDPSocket::getRxBufferSize_B() const {
     uint32_t size_B = 0;
     socklen_t len_B = sizeof(size_B);
-    if (getsockopt(m_socket, SOL_SOCKET, SO_RCVBUF,
+    if (::getsockopt(m_socket, SOL_SOCKET, SO_RCVBUF,
             reinterpret_cast<char*>(&size_B), &len_B) != 0) {
         return 0;
     }
@@ -409,16 +433,34 @@ uint32_t UDPSocket::getRxBufferSize_B() const {
 }
 bool UDPSocket::setTxBufferSize_B(const uint32_t size_B) {
     constexpr int32_t len_B = sizeof(size_B);
-    if (setsockopt(m_socket, SOL_SOCKET, SO_SNDBUF,
-            reinterpret_cast<const char*>(&size_B), len_B) != 0) {
-        return false;
+    if (::setsockopt(m_socket, SOL_SOCKET, SO_SNDBUF,
+            reinterpret_cast<const char*>(&size_B), len_B) == 0) {
+        return true;
     }
-    return true;
+    constexpr uint32_t sizeMin_B = 1 << 19; // 512 KiB
+    uint32_t lower_B = sizeMin_B;
+    uint32_t upper_B = size_B;
+    bool result = false;
+    while (lower_B <= upper_B) {
+        uint32_t middle_B = lower_B + (upper_B - lower_B) / 2;
+        if (::setsockopt(m_socket, SOL_SOCKET, SO_SNDBUF,
+                reinterpret_cast<const char*>(&size_B), len_B) == 0) {
+            result = true;
+            lower_B = middle_B + 1;
+        }
+        else {
+            upper_B = middle_B - 1;
+        }
+        if (upper_B - lower_B < sizeMin_B) {
+            break;
+        }
+    }
+    return result;
 }
 uint32_t UDPSocket::getTxBufferSize_B() const {
     uint32_t size_B = 0;
     socklen_t len_B = sizeof(size_B);
-    if (getsockopt(m_socket, SOL_SOCKET, SO_SNDBUF,
+    if (::getsockopt(m_socket, SOL_SOCKET, SO_SNDBUF,
             reinterpret_cast<char*>(&size_B), &len_B) != 0) {
         return 0;
     }
@@ -427,7 +469,7 @@ uint32_t UDPSocket::getTxBufferSize_B() const {
 
 void UDPSocket::process(const uint32_t timeout_ms) {
     if (timeout_ms > 0) {
-#     ifdef _WIN32
+#     if defined(_WIN32)
         WSAPOLLFD fd = {};
         fd.fd = m_socket;
         fd.events = POLLIN;
@@ -463,7 +505,7 @@ void UDPSocket::process(const uint32_t timeout_ms) {
 }
 
 bool UDPSocket::setThreadPriority(const uintptr_t thread, const char priority) {
-# ifdef _WIN32
+# if defined(_WIN32)
     switch (priority) {
     case 'H': return SetThreadPriority(reinterpret_cast<HANDLE>(thread), THREAD_PRIORITY_TIME_CRITICAL);
     case 'h': return SetThreadPriority(reinterpret_cast<HANDLE>(thread), THREAD_PRIORITY_HIGHEST);
@@ -472,6 +514,22 @@ bool UDPSocket::setThreadPriority(const uintptr_t thread, const char priority) {
     case 'L': return SetThreadPriority(reinterpret_cast<HANDLE>(thread), THREAD_PRIORITY_IDLE);
     default: return false;
     }
+# elif defined(__APPLE__)
+    // macOS: SCHED_OTHER only accepts sched_priority == 0.
+    // Real per-thread prioritization requires the real-time policy SCHED_RR,
+    // which in turn requires root / com.apple.root entitlement (otherwise EPERM).
+    const int32_t max_priority = sched_get_priority_max(SCHED_RR);
+    const int32_t min_priority = sched_get_priority_min(SCHED_RR);
+    struct sched_param param;
+    switch (priority) {
+    case 'H': param.sched_priority = max_priority; break;
+    case 'h': param.sched_priority = ((min_priority + max_priority) / 2 + max_priority) / 2; break;
+    case 'n': param.sched_priority = (min_priority + max_priority) / 2; break;
+    case 'l': param.sched_priority = (min_priority + (min_priority + max_priority) / 2) / 2; break;
+    case 'L': param.sched_priority = min_priority; break;
+    default: return false;
+    }
+    return pthread_setschedparam(reinterpret_cast<pthread_t>(thread), SCHED_RR, &param) == 0;
 # else
     const int32_t policy = SCHED_OTHER;
     const int32_t max_priority = sched_get_priority_max(policy);
@@ -485,7 +543,7 @@ bool UDPSocket::setThreadPriority(const uintptr_t thread, const char priority) {
     case 'L': param.sched_priority = min_priority; break;
     default: return false;
     }
-    return pthread_setschedparam(thread, policy, &param) == 0;
+    return pthread_setschedparam(reinterpret_cast<pthread_t>(thread), policy, &param) == 0;
 # endif
 }
 
@@ -493,7 +551,7 @@ void UDPSocket::open() {
     close();
     m_socket = ::socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
 
-# ifdef _WIN32
+# if defined(_WIN32)
     u_long nonBlocking = 1;
     ::ioctlsocket(m_socket, static_cast<long>(FIONBIO), &nonBlocking);
 # else
@@ -514,7 +572,7 @@ void UDPSocket::close() {
     if (m_socket == 0) {
         return;
     }
-# ifdef _WIN32
+# if defined(_WIN32)
     ::closesocket(m_socket);
 # else
     ::close(m_socket);
